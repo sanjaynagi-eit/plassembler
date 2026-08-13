@@ -8,27 +8,82 @@ import pysam
 from plassembler.utils.external_tools import ExternalTool
 from plassembler.utils.mapping import minimap2_model_for
 
+# Each read's tally is a small bitmask rather than a set of counters: the
+# classification below only ever asks "exactly one alignment?" and "hit a
+# plasmid / a chromosome at all?", never for the counts themselves. Every value
+# is below 16, so CPython's small-int cache means the dict costs no more than
+# its keys - against a dict plus two sets plus a list holding one string per
+# alignment before.
+HIT_PLASMID = 0b0001
+HIT_CHROMOSOME = 0b0010
+SEEN = 0b0100
+MULTIMAPPED = 0b1000
 
-def extract_long_fastqs_slow_keep_fastqs(out_dir, samname, plasmidname):
-    #################################################
-    # Get the single and multiple map reads as sets
-    #################################################
+# flags of a primary alignment, forward and reverse: no secondary (256),
+# supplementary (2048) or unmapped (4) bit
+PRIMARY_FLAGS = (0, 16)
 
-    # get list of all read names
-    read_names = []
+
+# fields of a SAM record, 0-based
+QNAME, SEQ, QUAL = 0, 9, 10
+# SAM's "absent" placeholder, used for RNAME of an unmapped read and for the
+# SEQ/QUAL of a record that does not carry them
+NO_VALUE = "*"
+
+
+def _fastq_fields(read):
+    """(name, sequence, quality string) straight from the raw SAM record.
+
+    read.query_sequence and read.query_qualities make pysam decode each record
+    into python objects - for ONT reads that is a 60,000-element array of ints
+    per read, which is then re-encoded to phred+33 one character at a time. The
+    SAM line already holds both as strings, so splitting it out is ~11x faster
+    and produces byte-identical output.
+    """
+    fields = read.to_string().split("\t", QUAL + 1)
+    return fields[QNAME], fields[SEQ], fields[QUAL]
+
+
+def _write_record(handle, name, sequence, quality):
+    """Write one fastq record."""
+    handle.write(f"@{name}\n{sequence}\n+{name}\n{quality}\n")
+
+
+def _tally_alignments(samname):
+    """Per read name: whether it aligned more than once, and whether any of its
+    alignments hit a plasmid and/or a chromosome.
+
+    Replaces building a python list holding one string per *alignment* and then
+    counting it - for a long-read sam that list is millions of strings.
+    """
+    tally = defaultdict(int)
     with pysam.AlignmentFile(samname, "r") as samfile:
         for read in samfile.fetch():
-            read_names.append(read.query_name)
+            read_name = read.query_name
+            previous = tally[read_name]
+            flags = previous | SEEN
+            if previous & SEEN:
+                flags |= MULTIMAPPED
+            contig_name = read.reference_name
+            if contig_name:
+                if "plasmid" in contig_name:
+                    flags |= HIT_PLASMID
+                elif "chromosome" in contig_name:
+                    flags |= HIT_CHROMOSOME
+            tally[read_name] = flags
+    return tally
 
-    # count occurrences of each read name
-    count_dict = defaultdict(int)
-    for item in read_names:
-        count_dict[item] += 1
 
-    # sets give O(1) membership (the per-read lookups below run once per
-    # alignment, so lists here would make the whole function quadratic)
-    single_read_names = {name for name, count in count_dict.items() if count == 1}
-    multi_read_names = {name for name, count in count_dict.items() if count != 1}
+def extract_long_fastqs_slow_keep_fastqs(out_dir, samname, plasmidname):
+    """Split long reads into plasmid, chromosome and multimapped fastqs.
+
+    Three cheap passes over the sam: one to tally alignments (metadata only, no
+    sequences touched), then singly-mapped reads, then multimapped ones. The
+    singles-then-multimapped write order is what the previous implementation
+    produced and is preserved deliberately, so the downstream assembler sees the
+    reads in the same order.
+    """
+    tally = _tally_alignments(samname)
 
     # ExitStack guarantees all output handles are closed even if a write or a
     # pysam call raises partway through
@@ -45,89 +100,46 @@ def extract_long_fastqs_slow_keep_fastqs(out_dir, samname, plasmidname):
         )
 
         #################################################
-        # process all single reads and count plasmid vs chromosome multimaps
+        # singly mapped reads - easy :)
         #################################################
-
-        plasmid_mm_dict = defaultdict(int)
-        chromosome_mm_dict = defaultdict(int)
-
         with pysam.AlignmentFile(samname, "r") as samfile:
             for read in samfile.fetch():
-                read_name = read.query_name
-                sequence = read.query_sequence
-                quality = read.query_qualities
-                # get contig name for the read
-                contig_name = samfile.get_reference_name(read.reference_id)
-
-                # single reads - easy :)
-                if read_name in single_read_names:
-                    # plasmid-mapped reads and all unmapped reads
-                    if (contig_name and "plasmid" in contig_name) or read.is_unmapped:
-                        plasmidfile.write(f"@{read_name}\n")
-                        plasmidfile.write(f"{sequence}\n")
-                        plasmidfile.write(f"+{read_name}\n")
-                        plasmidfile.write("".join(chr(q + 33) for q in quality) + "\n")
-                    elif contig_name and "chromosome" in contig_name:
-                        chrom_fastqfile.write(f"@{read_name}\n")
-                        chrom_fastqfile.write(f"{sequence}\n")
-                        chrom_fastqfile.write(f"+{read_name}\n")
-                        chrom_fastqfile.write(
-                            "".join(chr(q + 33) for q in quality) + "\n"
-                        )
-                # build count dictionaries for the multimap reads (next step)
+                if tally[read.query_name] & MULTIMAPPED:
+                    continue
+                contig_name = read.reference_name
+                if (contig_name and "plasmid" in contig_name) or read.is_unmapped:
+                    target = plasmidfile
+                elif contig_name and "chromosome" in contig_name:
+                    target = chrom_fastqfile
                 else:
-                    if contig_name and "plasmid" in contig_name:
-                        plasmid_mm_dict[read_name] += 1
-                    elif contig_name and "chromosome" in contig_name:
-                        chromosome_mm_dict[read_name] += 1
+                    continue
+                _write_record(target, *_fastq_fields(read))
 
         #################################################
-        # process all multimap reads
+        # multimapped reads - primary alignment only, since the secondary and
+        # supplementary records do not carry the full sequence
         #################################################
-
         with pysam.AlignmentFile(samname, "r") as samfile:
             for read in samfile.fetch():
-                read_name = read.query_name
-                sequence = read.query_sequence
-                quality = read.query_qualities
-                flag = read.flag
-
-                if read_name in multi_read_names:
-                    # multimap to both plasmid and chromosome
-                    if (
-                        plasmid_mm_dict[read_name] > 0
-                        and chromosome_mm_dict[read_name] > 0
-                    ):
-                        if quality is not None and (flag == 0 or flag == 16):
-                            # get only the primary
-                            multimap_plasmid_chromosome_fastqfile.write(
-                                f"@{read_name}\n"
-                            )
-                            multimap_plasmid_chromosome_fastqfile.write(f"{sequence}\n")
-                            multimap_plasmid_chromosome_fastqfile.write(
-                                f"+{read_name}\n"
-                            )
-                            multimap_plasmid_chromosome_fastqfile.write(
-                                "".join(chr(q + 33) for q in quality) + "\n"
-                            )
-                    # multimap to plasmid only -> plasmid file
-                    elif plasmid_mm_dict[read_name] > 0:
-                        if quality is not None and (flag == 0 or flag == 16):
-                            plasmidfile.write(f"@{read_name}\n")
-                            plasmidfile.write(f"{sequence}\n")
-                            plasmidfile.write(f"+{read_name}\n")
-                            plasmidfile.write(
-                                "".join(chr(q + 33) for q in quality) + "\n"
-                            )
-                    # multimap to chromosome only -> chromosome file
-                    elif chromosome_mm_dict[read_name] > 0:
-                        if quality is not None and (flag == 0 or flag == 16):
-                            chrom_fastqfile.write(f"@{read_name}\n")
-                            chrom_fastqfile.write(f"{sequence}\n")
-                            chrom_fastqfile.write(f"+{read_name}\n")
-                            chrom_fastqfile.write(
-                                "".join(chr(q + 33) for q in quality) + "\n"
-                            )
+                flags = tally[read.query_name]
+                if not flags & MULTIMAPPED:
+                    continue
+                if read.flag not in PRIMARY_FLAGS:
+                    continue
+                hits = flags & (HIT_PLASMID | HIT_CHROMOSOME)
+                if hits == (HIT_PLASMID | HIT_CHROMOSOME):
+                    target = multimap_plasmid_chromosome_fastqfile
+                elif hits == HIT_PLASMID:
+                    target = plasmidfile
+                elif hits == HIT_CHROMOSOME:
+                    target = chrom_fastqfile
+                else:
+                    continue
+                name, sequence, quality = _fastq_fields(read)
+                # a record with no qualities carries no usable read
+                if quality == NO_VALUE:
+                    continue
+                _write_record(target, name, sequence, quality)
 
 
 """

@@ -7,6 +7,7 @@ from Bio import SeqIO
 from Bio.SeqRecord import SeqRecord
 from loguru import logger
 
+from plassembler.utils.concat import concatenate_single_fasta
 from plassembler.utils.depth import (
     collate_depths,
     combine_depth_dfs,
