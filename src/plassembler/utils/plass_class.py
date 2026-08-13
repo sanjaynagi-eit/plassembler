@@ -464,21 +464,9 @@ class Plass:
         combined_fasta: Path = Path(outdir) / "long_combined.fasta"
         sorted_bam: Path = Path(outdir) / "combined_sorted_long.bam"
 
-        # # write to combined fasta
-
-        # Create a list to hold the combined sequences
-        combined_sequences = []
-
-        # Read and append sequences from the first FASTA file
-        for record in SeqIO.parse(chromosome, "fasta"):
-            combined_sequences.append(record)
-
-        # Read and append sequences from the second FASTA file
-        for record in SeqIO.parse(plas_fasta, "fasta"):
-            combined_sequences.append(record)
-
-        # Write the combined sequences to the output file
-        SeqIO.write(combined_sequences, combined_fasta, "fasta")
+        # write to combined fasta. No parsing needed - the contigs are already
+        # named as they should be, so this is a plain concatenation
+        concatenate_single_fasta(chromosome, plas_fasta, combined_fasta)
 
         # map and sort in one pipeline - no intermediate SAM on disk
         minimap_long_reads_to_sorted_bam(
@@ -766,30 +754,33 @@ class Assembly:
         combined_fasta = Path(self.outdir) / "combined.fasta"
         chromosome_name = ""
 
-        # rename the first contig as chromosome
+        # rename the first contig as chromosome. Records are streamed rather than
+        # collected into a list first, so an assembly is never held whole in RAM
         with open(chromosome_fasta, "r") as f_in, open(combined_fasta, "w") as f_out:
-            # Parse the input FASTA file
-            records = list(SeqIO.parse(f_in, "fasta"))
-            # keep chromosome name
-            chromosome_name = records[0].id
-            # Rename the first record
-            records[0].id = "chromosome"
-            records[0].description = ""
-            # Write the modified records to the output FASTA file
-            SeqIO.write(records, f_out, "fasta")
+            for index, record in enumerate(SeqIO.parse(f_in, "fasta")):
+                if index == 0:
+                    # keep chromosome name
+                    chromosome_name = record.id
+                    record.id = "chromosome"
+                    record.description = ""
+                SeqIO.write(record, f_out, "fasta")
 
         plasmid_names = []
 
         with open(plasmids_fasta, "r") as f_in, open(combined_fasta, "a") as f_out:
-            records = list(SeqIO.parse(f_in, "fasta"))
-            i = 0
-            for record in records:
-                i += 1
+            for i, record in enumerate(SeqIO.parse(f_in, "fasta"), start=1):
                 # keep plasmid name
                 plasmid_names.append(record.id)
                 record.id = str(i)
-                records[0].description = ""
-                # Write the  records to the output FASTA file
+                if i == 1:
+                    # NOTE: preserved as-is. The original cleared
+                    # records[0].description on every iteration, so only the
+                    # *first* plasmid ever lost its description while the rest
+                    # kept theirs. That looks like a copy-paste slip, and it
+                    # matters because get_contig_circularity() looks for
+                    # "circular" in the description - but changing it would
+                    # change results, so it is left for a separate fix.
+                    record.description = ""
                 SeqIO.write(record, f_out, "fasta")
 
         self.chromosome_name = chromosome_name
