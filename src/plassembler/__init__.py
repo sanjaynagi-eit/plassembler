@@ -55,6 +55,7 @@ from plassembler.utils.run_unicycler import (
 from plassembler.utils.sam_to_fastq import (
     extract_long_fastqs_fast,
     extract_long_fastqs_slow_keep_fastqs,
+    map_and_extract_long_fastqs,
 )
 from plassembler.utils.test_incompatibility import incompatbility
 from plassembler.utils.util import get_version, print_citation
@@ -1562,19 +1563,15 @@ def long(
         else:
             coverage = 50
 
-        logger.info("Mapping long reads.")
+        logger.info("Mapping long reads and extracting plasmid Fastqs.")
         input_long_reads: Path = Path(outdir) / "chopper_long_reads.fastq.gz"
         fasta: Path = Path(outdir) / "flye_renamed.fasta"
-        samfile: Path = Path(outdir) / "long_read.sam"
-        minimap_long_reads(
-            input_long_reads, fasta, samfile, threads, pacbio_model, logdir
-        )
-
-        # for long, custom function is quick enough
-        logger.info("Processing Sam/Bam Files and extracting Fastqs.")
-        samfile: Path = Path(outdir) / "long_read.sam"
         plasmidfastqs: Path = Path(outdir) / "plasmid_long.fastq"
-        extract_long_fastqs_fast(samfile, plasmidfastqs, threads)
+        # long-only mode is the one case where the sam has a single consumer, so
+        # the mapping feeds the extraction directly instead of via a file
+        map_and_extract_long_fastqs(
+            input_long_reads, fasta, plasmidfastqs, threads, pacbio_model, logdir
+        )
 
         # map the validated --pacbio_model to canu's read-type flag, error rate,
         # and whether read correction should be skipped (HiFi reads)

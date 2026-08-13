@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pysam
 
+from plassembler.utils.external_tools import ExternalTool
+from plassembler.utils.mapping import minimap2_model_for
+
 
 def extract_long_fastqs_slow_keep_fastqs(out_dir, samname, plasmidname):
     #################################################
@@ -132,8 +135,62 @@ Thanks to @fanvanf
 """
 
 
+# keep reads whose primary alignment (flag 0 or 16) is to a contig whose name
+# contains "plas", plus every unmapped read (flag 4), and emit them as fastq
+PLASMID_READ_AWK = (
+    '{if((($3 ~ /plas/)&& ($2 == "0"|| $2 == "16"))||($2 == "4"))'
+    ' print "@"$1"\\n"$10"\\n+"$1"\\n"$11}'
+)
+
+
 def extract_long_fastqs_fast(sam_name, plasmidfile, threads):
-    cmd = f'samtools  view -@ {threads} {sam_name} | awk \'{{if((($3 ~ /plas/)&& ($2 == "0"|| $2 == "16"))||($2 == "4")) print "@"$1"\\n"$10"\\n+"$1"\\n"$11}}\' > {plasmidfile}'
+    cmd = f"samtools  view -@ {threads} {sam_name} | awk '{PLASMID_READ_AWK}' > {plasmidfile}"
     # shell=True is required for the samtools | awk pipeline; check=True surfaces
     # a failing samtools instead of silently leaving an empty plasmid FASTQ.
     sp.run(cmd, shell=True, check=True)
+
+
+def map_and_extract_long_fastqs(
+    input_long_reads, fasta, plasmidfile, threads, pacbio_model, logdir
+):
+    """Map long reads and pull the plasmid/unmapped ones straight out of the stream.
+
+    In long-only mode `long_read.sam` has exactly one consumer - this extraction
+    - so writing minimap2's full uncompressed SAM to disk only to have samtools
+    read it straight back is pure I/O. Piping the three stages together removes
+    it entirely: on a real ONT isolate that is ~0.6 GiB written and re-read.
+
+    :param input_long_reads: reads to map
+    :param fasta: reference (renamed flye assembly)
+    :param plasmidfile: output fastq of plasmid and unmapped reads
+    :param threads: threads
+    :param pacbio_model: pacbio_model
+    :param logdir: logdir
+    :return:
+    """
+    minimap2_model = minimap2_model_for(pacbio_model)
+    minimap2 = ExternalTool(
+        tool="minimap2",
+        input="",
+        output="",
+        params=f" -ax {minimap2_model} -t {threads} {fasta} {input_long_reads}",
+        logdir=logdir,
+        outfile="",
+    )
+    samtools_view = ExternalTool(
+        tool="samtools",
+        input="",
+        output="",
+        params=f" view -@ {threads}",
+        logdir=logdir,
+        outfile="",
+    )
+    awk = ExternalTool(
+        tool="awk",
+        input="",
+        output="",
+        params=f" '{PLASMID_READ_AWK}'",
+        logdir=logdir,
+        outfile="",
+    )
+    ExternalTool.run_piped((minimap2, samtools_view, awk), outfile=plasmidfile)
