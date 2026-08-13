@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 from Bio import SeqIO
@@ -30,14 +31,12 @@ class Plass:
         no_plasmids_flag: bool = False,
         chromosome_flag: bool = True,
         threads: int = 1,
-        depth_df: pd.DataFrame() = pd.DataFrame({"col1": [1, 2, 3], "col2": [4, 5, 6]}),
-        mash_df: pd.DataFrame() = pd.DataFrame({"col1": [1, 2, 3], "col2": [4, 5, 6]}),
-        combined_depth_mash_df: pd.DataFrame() = pd.DataFrame(
-            {"col1": [1, 2, 3], "col2": [4, 5, 6]}
-        ),
+        depth_df: Optional[pd.DataFrame] = None,
+        mash_df: Optional[pd.DataFrame] = None,
+        combined_depth_mash_df: Optional[pd.DataFrame] = None,
         long_only: bool = False,
         unicycler_success: bool = True,
-        filtered_out_contig_ids: list = [],
+        filtered_out_contig_ids: Optional[list] = None,
     ) -> None:
         """
         Parameters
@@ -68,12 +67,18 @@ class Plass:
         self.no_plasmids_flag = no_plasmids_flag
         self.chromosome_flag = chromosome_flag
         self.threads = threads
-        self.depth_df = depth_df
-        self.mash_df = mash_df
-        self.combined_depth_mash_df = combined_depth_mash_df
+        # None rather than a shared default instance: a mutable default is
+        # created once at import and shared by every instance
+        self.depth_df = pd.DataFrame() if depth_df is None else depth_df
+        self.mash_df = pd.DataFrame() if mash_df is None else mash_df
+        self.combined_depth_mash_df = (
+            pd.DataFrame() if combined_depth_mash_df is None else combined_depth_mash_df
+        )
         self.long_only = long_only
         self.unicycler_success = unicycler_success
-        self.filtered_out_contig_ids = filtered_out_contig_ids
+        self.filtered_out_contig_ids = (
+            [] if filtered_out_contig_ids is None else filtered_out_contig_ids
+        )
 
     def get_contig_count(self):
         """Counts the number of contigs assembled
@@ -135,7 +140,7 @@ class Plass:
                             if c == 1:
                                 dna_header = "chromosome"
                             else:
-                                if c == "2":
+                                if c == 2:
                                     message = "Multiple contigs above the specified chromosome length -c have been detected. \nIf you are hoping for plasmids from haploid bacteria, please check your value for -c."
                                     logger.info(message)
                                 dna_header = "chromosome_" + str(c)
@@ -200,6 +205,12 @@ class Plass:
                                 f"{dna_header}\t1\t{contig_len}\n"
                             )  # Write read name
                             i += 1
+            # these were opened without a context manager, so close them
+            # explicitly: downstream samtools reads them with -L, and until
+            # now that only worked because CPython's refcounting happened to
+            # flush them when this method returned
+            bed_file.close()
+            bed_chrom_file.close()
         # add to object
         self.chromosome_flag = chromosome_flag
 
@@ -256,7 +267,7 @@ class Plass:
                             if c == 1:
                                 dna_header = "chromosome"
                             else:
-                                if c == "2":
+                                if c == 2:
                                     message = "Multiple contigs above the specified chromosome length -c have been detected. \nIf you are hoping for plasmids from haploid bacteria, please check your value for -c."
                                     logger.info(message)
                                 dna_header = "chromosome_" + str(c)
@@ -291,6 +302,12 @@ class Plass:
                             )  # Write read name
                             i += 1
 
+            # these were opened without a context manager, so close them
+            # explicitly: downstream samtools reads them with -L, and until
+            # now that only worked because CPython's refcounting happened to
+            # flush them when this method returned
+            bed_file.close()
+            bed_chrom_file.close()
         # add to object
         self.chromosome_flag = chromosome_flag
 
@@ -347,7 +364,7 @@ class Plass:
                             if c == 1:
                                 dna_header = "chromosome"
                             else:
-                                if c == "2":
+                                if c == 2:
                                     message = "Multiple contigs above the specified chromosome length -c have been detected. \nIf you are hoping for plasmids from haploid bacteria, please check your value for -c."
                                     logger.info(message)
                                 dna_header = "chromosome_" + str(c)
@@ -380,6 +397,12 @@ class Plass:
                                 f"{dna_header}\t1\t{contig_len}\n"
                             )  # Write read name
                             i += 1
+            # these were opened without a context manager, so close them
+            # explicitly: downstream samtools reads them with -L, and until
+            # now that only worked because CPython's refcounting happened to
+            # flush them when this method returned
+            bed_file.close()
+            bed_chrom_file.close()
         # add to object
         self.chromosome_flag = chromosome_flag
 
@@ -884,13 +907,11 @@ class Assembly:
         short_flag: bool = True,
         chromosome_name: str = "chromosome",
         contig_count: int = 1,
-        plasmid_names: list = ["1"],
+        plasmid_names: Optional[list] = None,
         threads: int = 1,
-        depth_df: pd.DataFrame() = pd.DataFrame({"col1": [1, 2, 3], "col2": [4, 5, 6]}),
-        mash_df: pd.DataFrame() = pd.DataFrame({"col1": [1, 2, 3], "col2": [4, 5, 6]}),
-        combined_depth_mash_df: pd.DataFrame() = pd.DataFrame(
-            {"col1": [1, 2, 3], "col2": [4, 5, 6]}
-        ),
+        depth_df: Optional[pd.DataFrame] = None,
+        mash_df: Optional[pd.DataFrame] = None,
+        combined_depth_mash_df: Optional[pd.DataFrame] = None,
     ) -> None:
         """
         Parameters
@@ -913,11 +934,18 @@ class Assembly:
         self.outdir = outdir
         self.contig_count = contig_count
         self.threads = threads
-        self.depth_df = depth_df
-        self.mash_df = mash_df
-        self.combined_depth_mash_df = combined_depth_mash_df
+        # None rather than a shared default instance: a mutable default is
+        # created once at import and shared by every instance
+        self.depth_df = pd.DataFrame() if depth_df is None else depth_df
+        self.mash_df = pd.DataFrame() if mash_df is None else mash_df
+        self.combined_depth_mash_df = (
+            pd.DataFrame() if combined_depth_mash_df is None else combined_depth_mash_df
+        )
         self.long_flag = long_flag
         self.short_flag = short_flag
+        self.chromosome_name = chromosome_name
+        # None rather than a shared default list, which a mutable default would be
+        self.plasmid_names = ["1"] if plasmid_names is None else plasmid_names
 
     def combine_input_fastas(self, chromosome_fasta: Path, plasmids_fasta: Path):
         """wrapper function to get depth of each plasmid
