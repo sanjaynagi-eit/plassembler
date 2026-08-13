@@ -3,7 +3,6 @@
 # https://github.com/rrwick/Small-plasmid-Nanopore/blob/main/scripts/get_depths.py
 #########################################
 import os
-import statistics
 import subprocess as sp
 from pathlib import Path
 
@@ -66,22 +65,65 @@ def get_contig_circularity(fasta):
     return circular_status
 
 
-def get_depths_from_bam(bam_file: Path, contig_lengths: pd.DataFrame):
-    """maps runs samtools depth on bam
+# rows of `samtools depth` output parsed per chunk. Bounds the transient memory
+# of the parse regardless of genome size / coverage.
+DEPTH_CHUNK_ROWS = 2_000_000
+
+
+def get_depths_from_bam(bam_file: Path, contig_lengths: dict):
+    """runs samtools depth on a bam and returns per-base depth arrays
+
+    `samtools depth` only emits positions with non-zero coverage, so each
+    contig starts as an all-zero array that the reported positions are scattered
+    into.
+
+    The output is streamed and parsed in bounded chunks rather than being read
+    into one big string: for a 5 Mb chromosome at high coverage the old
+    `check_output` + `splitlines` + list-of-python-ints approach held several
+    hundred MB, where the int32 arrays below hold 4 bytes per base.
+
     :param bam_file: Path
-    :param: contig_lengths: dictionary of headers and contig lengths
-    :return: depths: dictionary of contigs and depths
+    :param contig_lengths: dictionary of headers and contig lengths
+    :return: depths: dictionary of contigs and per-base depth arrays
     """
-    depths = {}
-    for repName, repLength in contig_lengths.items():
-        depths[repName] = [0] * repLength
-    depthCommand = ["samtools", "depth", bam_file]
+    depths = {
+        repName: np.zeros(repLength, dtype=np.int32)
+        for repName, repLength in contig_lengths.items()
+    }
+
+    depthCommand = ["samtools", "depth", str(bam_file)]
     with open(os.devnull, "wb") as devNull:
-        depthOutput = sp.check_output(depthCommand, stderr=devNull).decode()
-    for line in depthOutput.splitlines():  # parse output
-        parts = line.strip().split("\t")
-        repName = parts[0]
-        depths[repName][int(parts[1]) - 1] = int(parts[2])
+        proc = sp.Popen(depthCommand, stdout=sp.PIPE, stderr=devNull)
+        try:
+            chunks = pd.read_csv(
+                proc.stdout,
+                sep="\t",
+                header=None,
+                names=["contig", "pos", "depth"],
+                dtype={"contig": str, "pos": np.int64, "depth": np.int32},
+                chunksize=DEPTH_CHUNK_ROWS,
+            )
+            for chunk in chunks:
+                for repName, group in chunk.groupby("contig", sort=False):
+                    # a contig in the bam header that is not in contig_lengths
+                    # would be a bug upstream; skipping it keeps the old
+                    # behaviour of only reporting requested contigs
+                    if repName not in depths:
+                        continue
+                    depths[repName][group["pos"].to_numpy() - 1] = group[
+                        "depth"
+                    ].to_numpy()
+        except pd.errors.EmptyDataError:
+            # no aligned bases at all - every contig keeps its zero array
+            pass
+        finally:
+            if proc.stdout is not None:
+                proc.stdout.close()
+            returncode = proc.wait()
+
+    if returncode != 0:
+        raise sp.CalledProcessError(returncode, depthCommand)
+
     return depths
 
 
@@ -105,16 +147,22 @@ def collate_depths(depths, shortFlag, contig_lengths):
     # iterate over the contigs
     for replicon_name, base_depths in depths.items():
         replicon_length = contig_lengths[replicon_name]
-        try:
-            mean_depth = round(statistics.mean(base_depths), 2)
-            depth_stdev = round(statistics.stdev(base_depths), 2)
+        base_depths = np.asarray(base_depths)
+        # statistics.stdev needed >= 2 observations and statistics.mean >= 1, so
+        # anything shorter than 2 bases used to raise StatisticsError and report
+        # NA for all four columns. numpy would return nan instead, so guard.
+        if base_depths.size < 2:
+            mean_depth, depth_stdev, q25, q75 = "NA", "NA", "NA", "NA"
+        else:
+            mean_depth = round(float(np.mean(base_depths)), 2)
+            # ddof=1: statistics.stdev is the *sample* standard deviation, and
+            # numpy defaults to the population one
+            depth_stdev = round(float(np.std(base_depths, ddof=1)), 2)
             q25, q75 = np.percentile(base_depths, [25, 75])
             q25, q75 = int(q25), int(q75)
             # save the chromosome depth
             if replicon_name == "chromosome":
                 chromosome_depth = mean_depth
-        except statistics.StatisticsError:  # if can't calculate
-            mean_depth, depth_stdev, q25, q75 = "NA", "NA", "NA", "NA"
         # append to list
         contig_names.append(replicon_name)
         contig_length.append(replicon_length)
