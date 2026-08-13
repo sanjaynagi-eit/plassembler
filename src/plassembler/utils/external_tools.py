@@ -2,6 +2,7 @@ import hashlib
 import shlex
 import subprocess
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -71,6 +72,61 @@ class ExternalTool:
     @staticmethod
     def _run_core(command: List[str], stdout_fh, stderr_fh) -> None:
         subprocess.check_call(command, stdout=stdout_fh, stderr=stderr_fh)
+
+    @staticmethod
+    def run_piped(
+        tools: Tuple["ExternalTool", ...], outfile: Optional[Path] = None
+    ) -> None:
+        """Run several tools as one pipeline, without a shell.
+
+        Used to avoid materialising intermediates that exist only so the next
+        command can read them back - most importantly the full uncompressed SAM
+        that each mapping step used to write to disk before samtools re-read it.
+
+        :param tools: stages, in order; each stage's stdout feeds the next
+        :param outfile: file for the last stage's stdout. If None the last stage
+            writes its own output (e.g. `samtools sort -o`) and its stdout goes
+            to that tool's .out log, matching ExternalTool.run.
+        """
+        joined = " | ".join(tool.command_as_str for tool in tools)
+        logger.info(f"Started running {joined} ...")
+
+        procs: List[subprocess.Popen] = []
+        with ExitStack() as stack:
+            if outfile is None:
+                last_stdout = stack.enter_context(open(tools[-1].out_log, "w"))
+            else:
+                last_stdout = stack.enter_context(open(outfile, "wb"))
+
+            upstream_stdout = None
+            for index, tool in enumerate(tools):
+                stderr_fh = stack.enter_context(open(tool.err_log, "w"))
+                print(f"Command line: {tool.command_as_str}", file=stderr_fh)
+                is_last = index == len(tools) - 1
+                proc = subprocess.Popen(
+                    tool.command,
+                    stdin=upstream_stdout,
+                    stdout=last_stdout if is_last else subprocess.PIPE,
+                    stderr=stderr_fh,
+                )
+                # the parent must drop its copy of the upstream read end,
+                # otherwise that stage never sees EOF
+                if upstream_stdout is not None:
+                    upstream_stdout.close()
+                upstream_stdout = proc.stdout
+                procs.append(proc)
+
+            # wait downstream-first: an upstream stage blocked writing into a
+            # dead pipe only gets its SIGPIPE once the reader is gone
+            for proc in reversed(procs):
+                proc.wait()
+
+        # report the earliest failing stage, which is the informative one
+        for tool, proc in zip(tools, procs):
+            if proc.returncode != 0:
+                raise subprocess.CalledProcessError(proc.returncode, tool.command)
+
+        logger.info(f"Done running {joined}")
 
     @staticmethod
     def run_tools(
