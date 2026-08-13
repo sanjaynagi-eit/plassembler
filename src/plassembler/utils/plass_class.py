@@ -6,7 +6,6 @@ from Bio import SeqIO
 from Bio.SeqRecord import SeqRecord
 from loguru import logger
 
-from plassembler.utils.bam import sam_to_sorted_bam
 from plassembler.utils.depth import (
     collate_depths,
     combine_depth_dfs,
@@ -16,7 +15,10 @@ from plassembler.utils.depth import (
     get_contig_lengths,
     get_depths_from_bam,
 )
-from plassembler.utils.mapping import minimap_long_reads, minimap_short_reads
+from plassembler.utils.mapping import (
+    minimap_long_reads_to_sorted_bam,
+    minimap_short_reads_to_sorted_bam,
+)
 from plassembler.utils.run_mash import get_contig_count, is_file_empty
 
 
@@ -406,27 +408,20 @@ class Plass:
 
         input_long_reads: Path = Path(outdir) / "chopper_long_reads.fastq.gz"
         fasta: Path = Path(outdir) / "combined.fasta"
-        sam_file: Path = Path(outdir) / "combined_long.sam"
         sorted_bam: Path = Path(outdir) / "combined_sorted_long.bam"
 
-        # map
-        minimap_long_reads(
-            input_long_reads, fasta, sam_file, threads, pacbio_model, logdir
+        # map and sort in one pipeline - no intermediate SAM on disk
+        minimap_long_reads_to_sorted_bam(
+            input_long_reads, fasta, sorted_bam, threads, pacbio_model, logdir
         )
-        # sort
-        sam_to_sorted_bam(sam_file, sorted_bam, threads, logdir)
 
         # short reads
         r1: Path = Path(outdir) / "trimmed_R1.fastq"
         r2: Path = Path(outdir) / "trimmed_R2.fastq"
         fasta: Path = Path(outdir) / "combined.fasta"
-        sam_file: Path = Path(outdir) / "combined_short.sam"
         sorted_bam: Path = Path(outdir) / "combined_sorted_short.bam"
 
-        # map
-        minimap_short_reads(r1, r2, fasta, sam_file, threads, logdir)
-        # sort
-        sam_to_sorted_bam(sam_file, sorted_bam, threads, logdir)
+        minimap_short_reads_to_sorted_bam(r1, r2, fasta, sorted_bam, threads, logdir)
 
         # get contig lengths
 
@@ -463,7 +458,6 @@ class Plass:
         input_long_reads: Path = Path(outdir) / "chopper_long_reads.fastq.gz"
         chromosome: Path = Path(outdir) / "chromosome.fasta"
         combined_fasta: Path = Path(outdir) / "long_combined.fasta"
-        sam_file: Path = Path(outdir) / "combined_long.sam"
         sorted_bam: Path = Path(outdir) / "combined_sorted_long.bam"
 
         # # write to combined fasta
@@ -482,12 +476,10 @@ class Plass:
         # Write the combined sequences to the output file
         SeqIO.write(combined_sequences, combined_fasta, "fasta")
 
-        # map
-        minimap_long_reads(
-            input_long_reads, combined_fasta, sam_file, threads, pacbio_model, logdir
+        # map and sort in one pipeline - no intermediate SAM on disk
+        minimap_long_reads_to_sorted_bam(
+            input_long_reads, combined_fasta, sorted_bam, threads, pacbio_model, logdir
         )
-        # sort
-        sam_to_sorted_bam(sam_file, sorted_bam, threads, logdir)
 
         # get contig lengths
         contig_lengths = get_contig_lengths(combined_fasta)
@@ -970,29 +962,22 @@ class Assembly:
 
         input_long_reads: Path = Path(outdir) / "chopper_long_reads.fastq.gz"
         fasta: Path = Path(outdir) / "combined.fasta"
-        sam_file: Path = Path(outdir) / "combined_long.sam"
         sorted_bam: Path = Path(outdir) / "combined_sorted_long.bam"
 
-        # map
+        # map and sort in one pipeline - no intermediate SAM on disk
         if self.long_flag is True:
-            minimap_long_reads(
-                input_long_reads, fasta, sam_file, threads, pacbio_model, logdir
+            minimap_long_reads_to_sorted_bam(
+                input_long_reads, fasta, sorted_bam, threads, pacbio_model, logdir
             )
-            # sort
-            sam_to_sorted_bam(sam_file, sorted_bam, threads, logdir)
 
         # short reads
         r1: Path = Path(outdir) / "trimmed_R1.fastq"
         r2: Path = Path(outdir) / "trimmed_R2.fastq"
         fasta: Path = Path(outdir) / "combined.fasta"
-        sam_file: Path = Path(outdir) / "combined_short.sam"
         sorted_bam: Path = Path(outdir) / "combined_sorted_short.bam"
 
-        # map
         if self.short_flag is True:
-            minimap_short_reads(r1, r2, fasta, sam_file, threads, logdir)
-            # sort
-            sam_to_sorted_bam(sam_file, sorted_bam, threads, logdir)
+            minimap_short_reads_to_sorted_bam(r1, r2, fasta, sorted_bam, threads, logdir)
 
         # get contig lengths
 
