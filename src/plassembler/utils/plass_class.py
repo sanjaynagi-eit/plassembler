@@ -19,7 +19,11 @@ from plassembler.utils.mapping import (
     minimap_long_reads_to_sorted_bam,
     minimap_short_reads_to_sorted_bam,
 )
-from plassembler.utils.run_mash import get_contig_count, is_file_empty
+from plassembler.utils.run_mash import (
+    get_contig_count,
+    load_plsdb_metadata,
+    mash_tophits_df,
+)
 
 
 class Plass:
@@ -512,173 +516,12 @@ class Plass:
             contig_count = get_contig_count(os.path.join(outdir, "assembly.fasta"))
         # update with final plasmid count number
         self.contig_count = contig_count
-        # get mash tsv output contig
-        mash_tsv = os.path.join(outdir, "mash.tsv")
-        col_list = [
-            "contig",
-            "NUCCORE_ACC",
-            "mash_distance",
-            "mash_pval",
-            "mash_matching_hashes",
-        ]
 
-        # check if mash tsv file is empty -> no hits
-        mash_empty = is_file_empty(mash_tsv)
-        # instantiate tophits list
-        tophits_mash_df = []
-
-        if mash_empty is False:
-            mash_df = pd.read_csv(
-                mash_tsv, delimiter="\t", index_col=False, names=col_list
-            )
-            # get list of contigs from unicycler: 1 -> total number of contigs
-            contigs = range(1, contig_count + 1)
-
-            # instantiate tophits list
-            tophits = []
-
-            for contig in contigs:
-                hit_df = (
-                    mash_df.loc[mash_df["contig"] == contig]
-                    .sort_values("mash_distance")
-                    .reset_index(drop=True)
-                )
-                hits = len(hit_df["mash_distance"])
-                # add only if there is a hit
-                if hits > 0:
-                    tmp_df = (
-                        mash_df.loc[mash_df["contig"] == contig]
-                        .sort_values("mash_distance")
-                        .reset_index(drop=True)
-                        .loc[0]
-                    )
-                    tophits.append(
-                        [
-                            tmp_df.contig,
-                            "Yes",
-                            tmp_df.NUCCORE_ACC,
-                            tmp_df.mash_distance,
-                            tmp_df.mash_pval,
-                            tmp_df.mash_matching_hashes,
-                        ]
-                    )
-                else:  # no hits append no it
-                    tophits.append([contig, "", "", "", "", ""])
-                # create tophits df
-            tophits_mash_df = pd.DataFrame(
-                tophits,
-                columns=[
-                    "contig",
-                    "PLSDB_hit",
-                    "NUCCORE_ACC",
-                    "mash_distance",
-                    "mash_pval",
-                    "mash_matching_hashes",
-                ],
-            )
-
-        else:  # empty mash file
-            contigs = range(1, contig_count + 1)
-            # create empty df
-            tophits_mash_df = pd.DataFrame(
-                columns=[
-                    "contig",
-                    "PLSDB_hit",
-                    "NUCCORE_ACC",
-                    "mash_distance",
-                    "mash_pval",
-                    "mash_matching_hashes",
-                ]
-            )
-            for contig in contigs:
-                tophits_mash_df.loc[contig - 1] = [contig, "", "", "", "", ""]
-
-        # read in the plasdb tsv to get the description
-        plsdb_tsv_file = os.path.join(plassembler_db_dir, "plsdb_2023_11_03_v2.tsv")
-        cols = [
-            "NUCCORE_UID",
-            "NUCCORE_ACC",
-            "NUCCORE_Description",
-            "NUCCORE_CreateDate",
-            "NUCCORE_Topology",
-            "NUCCORE_Completeness",
-            "NUCCORE_TaxonID",
-            "NUCCORE_Genome",
-            "NUCCORE_Length",
-            "NUCCORE_DuplicatedEntry",
-            "NUCCORE_Source",
-            "NUCCORE_BiosampleID",
-            "BIOSAMPLE_UID",
-            "BIOSAMPLE_ACC",
-            "BIOSAMPLE_Location",
-            "BIOSAMPLE_Coordinates",
-            "BIOSAMPLE_IsolationSource",
-            "BIOSAMPLE_Host",
-            "BIOSAMPLE_CollectionDate",
-            "BIOSAMPLE_HostDisease",
-            "BIOSAMPLE_SampleType",
-            "ASSEMBLY_UID",
-            "ASSEMBLY_ACC",
-            "ASSEMBLY_Status",
-            "ASSEMBLY_coverage",
-            "ASSEMBLY_SeqReleaseDate",
-            "ASSEMBLY_SubmissionDate",
-            "ASSEMBLY_Lastest",
-            "ASSEMBLY_BiosampleID",
-            "TAXONOMY_superkingdom",
-            "TAXONOMY_phylum",
-            "TAXONOMY_class",
-            "TAXONOMY_order",
-            "TAXONOMY_family",
-            "TAXONOMY_genus",
-            "TAXONOMY_species",
-            "TAXONOMY_strain",
-            "TAXONOMY_UID",
-            "TAXONOMY_taxon_rank",
-            "TAXONOMY_taxon_name",
-            "TAXONOMY_taxon_lineage",
-            "TAXONOMY_superkingdom_id",
-            "TAXONOMY_phylum_id",
-            "TAXONOMY_class_id",
-            "TAXONOMY_order_id",
-            "TAXONOMY_family_id",
-            "TAXONOMY_genus_id",
-            "TAXONOMY_species_id",
-            "TAXONOMY_strain_id",
-            "has_biosample",
-            "has_assembly",
-            "has_location",
-            "rMLST_hits",
-            "rMLST_hitscount",
-            "inclusions",
-            "NUCCORE_GC",
-            "Length",
-            "BIOSAMPLE_Host_processed",
-            "BIOSAMPLE_Host_processed_source",
-            "BIOSAMPLE_Host_label",
-            "BIOSAMPLE_HostDisease_processed",
-            "loc_lat",
-            "loc_lng",
-            "loc_parsed",
-            "D1",
-            "D2",
-            "plasmidfinder",
-            "pmlst",
-        ]
-
-        plsdb_tsv = pd.read_csv(
-            plsdb_tsv_file,
-            delimiter="\t",
-            index_col=False,
-            names=cols,
-            skiprows=1,
-            low_memory=False,
+        tophits_mash_df = mash_tophits_df(
+            os.path.join(outdir, "mash.tsv"), contig_count
         )
-        combined_mash_df = tophits_mash_df.merge(
-            plsdb_tsv, on="NUCCORE_ACC", how="left"
-        )
-
-        self.mash_df = combined_mash_df
+        plsdb_tsv = load_plsdb_metadata(plassembler_db_dir)
+        self.mash_df = tophits_mash_df.merge(plsdb_tsv, on="NUCCORE_ACC", how="left")
 
     def combine_depth_mash_tsvs(self, prefix, depth_filter, skip_mash):
         """
@@ -1027,174 +870,11 @@ class Assembly:
         # update with final plasmid count number
         self.contig_count = contig_count
 
-        # get mash tsv output contig
-        mash_tsv = os.path.join(outdir, "mash.tsv")
-        col_list = [
-            "contig",
-            "NUCCORE_ACC",
-            "mash_distance",
-            "mash_pval",
-            "mash_matching_hashes",
-        ]
-
-        # check if mash tsv file is empty -> no hits
-        mash_empty = is_file_empty(mash_tsv)
-        # instantiate tophits list
-        tophits_mash_df = []
-
-        if mash_empty is False:
-            mash_df = pd.read_csv(
-                mash_tsv, delimiter="\t", index_col=False, names=col_list
-            )
-            # get list of contigs from unicycler: 1 -> total number of contigs
-            contigs = range(1, contig_count + 1)
-
-            # instantiate tophits list
-            tophits = []
-
-            for contig in contigs:
-                hit_df = (
-                    mash_df.loc[mash_df["contig"] == contig]
-                    .sort_values("mash_distance")
-                    .reset_index(drop=True)
-                )
-                hits = len(hit_df["mash_distance"])
-                # add only if there is a hit
-                if hits > 0:
-                    tmp_df = (
-                        mash_df.loc[mash_df["contig"] == contig]
-                        .sort_values("mash_distance")
-                        .reset_index(drop=True)
-                        .loc[0]
-                    )
-                    tophits.append(
-                        [
-                            tmp_df.contig,
-                            "Yes",
-                            tmp_df.NUCCORE_ACC,
-                            tmp_df.mash_distance,
-                            tmp_df.mash_pval,
-                            tmp_df.mash_matching_hashes,
-                        ]
-                    )
-                else:  # no hits append no it
-                    tophits.append([contig, "", "", "", "", ""])
-                # create tophits df
-            tophits_mash_df = pd.DataFrame(
-                tophits,
-                columns=[
-                    "contig",
-                    "PLSDB_hit",
-                    "NUCCORE_ACC",
-                    "mash_distance",
-                    "mash_pval",
-                    "mash_matching_hashes",
-                ],
-            )
-
-        else:  # empty mash file
-            contigs = range(1, contig_count + 1)
-            # create empty df
-            tophits_mash_df = pd.DataFrame(
-                columns=[
-                    "contig",
-                    "PLSDB_hit",
-                    "NUCCORE_ACC",
-                    "mash_distance",
-                    "mash_pval",
-                    "mash_matching_hashes",
-                ]
-            )
-            for contig in contigs:
-                tophits_mash_df.loc[contig - 1] = [contig, "", "", "", "", ""]
-
-        # read in the plasdb tsv to get the description
-        plsdb_tsv_file = os.path.join(plassembler_db_dir, "plsdb_2023_11_03_v2.tsv")
-
-        cols = [
-            "NUCCORE_UID",
-            "NUCCORE_ACC",
-            "NUCCORE_Description",
-            "NUCCORE_CreateDate",
-            "NUCCORE_Topology",
-            "NUCCORE_Completeness",
-            "NUCCORE_TaxonID",
-            "NUCCORE_Genome",
-            "NUCCORE_Length",
-            "NUCCORE_DuplicatedEntry",
-            "NUCCORE_Source",
-            "NUCCORE_BiosampleID",
-            "BIOSAMPLE_UID",
-            "BIOSAMPLE_ACC",
-            "BIOSAMPLE_Location",
-            "BIOSAMPLE_Coordinates",
-            "BIOSAMPLE_IsolationSource",
-            "BIOSAMPLE_Host",
-            "BIOSAMPLE_CollectionDate",
-            "BIOSAMPLE_HostDisease",
-            "BIOSAMPLE_SampleType",
-            "ASSEMBLY_UID",
-            "ASSEMBLY_ACC",
-            "ASSEMBLY_Status",
-            "ASSEMBLY_coverage",
-            "ASSEMBLY_SeqReleaseDate",
-            "ASSEMBLY_SubmissionDate",
-            "ASSEMBLY_Lastest",
-            "ASSEMBLY_BiosampleID",
-            "TAXONOMY_superkingdom",
-            "TAXONOMY_phylum",
-            "TAXONOMY_class",
-            "TAXONOMY_order",
-            "TAXONOMY_family",
-            "TAXONOMY_genus",
-            "TAXONOMY_species",
-            "TAXONOMY_strain",
-            "TAXONOMY_UID",
-            "TAXONOMY_taxon_rank",
-            "TAXONOMY_taxon_name",
-            "TAXONOMY_taxon_lineage",
-            "TAXONOMY_superkingdom_id",
-            "TAXONOMY_phylum_id",
-            "TAXONOMY_class_id",
-            "TAXONOMY_order_id",
-            "TAXONOMY_family_id",
-            "TAXONOMY_genus_id",
-            "TAXONOMY_species_id",
-            "TAXONOMY_strain_id",
-            "has_biosample",
-            "has_assembly",
-            "has_location",
-            "rMLST_hits",
-            "rMLST_hitscount",
-            "inclusions",
-            "NUCCORE_GC",
-            "Length",
-            "BIOSAMPLE_Host_processed",
-            "BIOSAMPLE_Host_processed_source",
-            "BIOSAMPLE_Host_label",
-            "BIOSAMPLE_HostDisease_processed",
-            "loc_lat",
-            "loc_lng",
-            "loc_parsed",
-            "D1",
-            "D2",
-            "plasmidfinder",
-            "pmlst",
-        ]
-
-        plsdb_tsv = pd.read_csv(
-            plsdb_tsv_file,
-            delimiter="\t",
-            index_col=False,
-            names=cols,
-            skiprows=1,
-            low_memory=False,
+        tophits_mash_df = mash_tophits_df(
+            os.path.join(outdir, "mash.tsv"), contig_count
         )
-        combined_mash_df = tophits_mash_df.merge(
-            plsdb_tsv, on="NUCCORE_ACC", how="left"
-        )
-
-        self.mash_df = combined_mash_df
+        plsdb_tsv = load_plsdb_metadata(plassembler_db_dir)
+        self.mash_df = tophits_mash_df.merge(plsdb_tsv, on="NUCCORE_ACC", how="left")
 
     def combine_depth_mash_tsvs(self, prefix, no_copy_numbers):
         """
