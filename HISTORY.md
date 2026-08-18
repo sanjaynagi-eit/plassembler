@@ -1,5 +1,12 @@
 # History
 
+1.8.4 (2026-08-18)
+------------------
+
+* Fixes the 75bp head and tail cropping of long reads, which had been silently ignored since `chopper` v0.11.0. From v0.11.0, `chopper` only applies `--headcrop`/`--tailcrop` when `--trim-approach fixed-crop` is also specified, so `plassembler` now passes this
+* Bumps the minimum `chopper` version to v0.11.0
+* As a result, filtered long reads are 150bp shorter as originally intended, and reads falling below `--min_length` after cropping are now removed. Expect small changes to long read depths and plasmid copy number estimates compared to v1.8.3
+
 1.8.3 (2026-07-05)
 ------------------
 

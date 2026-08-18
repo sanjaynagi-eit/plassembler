@@ -34,6 +34,10 @@ def chopper(
         threads,
         "-l",
         min_length,
+        # chopper >=0.11.0 only applies --headcrop/--tailcrop under this approach;
+        # without it they are silently ignored
+        "--trim-approach",
+        "fixed-crop",
         "--headcrop",
         "75",
         "--tailcrop",
