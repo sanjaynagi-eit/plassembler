@@ -30,7 +30,9 @@ from src.plassembler.utils.depth import (
 
 # import functions
 from src.plassembler.utils.input_commands import (
+    MIN_CHOPPER_VERSION,
     check_dependencies,
+    parse_chopper_version,
     parse_unicycler_version,
     validate_fasta,
     validate_fastas_assembled_mode,
@@ -198,6 +200,23 @@ class TestInputCommands(unittest.TestCase):
     def test_parse_unicycler_version_missing_raises(self):
         with self.assertRaises(ValueError):
             parse_unicycler_version("bash: unicycler: command not found\n")
+
+    # chopper version parsing
+    def test_parse_chopper_version_clean(self):
+        self.assertEqual(parse_chopper_version("chopper 0.11.0\n"), (0, 11, 0))
+
+    def test_parse_chopper_version_unparseable(self):
+        # check_dependencies warns on None rather than crashing, so a missing or
+        # reworded version string must come back as None, not raise
+        self.assertIsNone(parse_chopper_version("chopper not found"))
+        self.assertIsNone(parse_chopper_version(""))
+
+    def test_chopper_minimum_version_ordering(self):
+        # plassembler passes --trim-approach, added in chopper v0.11.0
+        self.assertLess(parse_chopper_version("chopper 0.10.0"), MIN_CHOPPER_VERSION)
+        self.assertGreaterEqual(
+            parse_chopper_version("chopper 0.13.0"), MIN_CHOPPER_VERSION
+        )
 
     # checks all external dependencies are installed
     @pytest.mark.slow

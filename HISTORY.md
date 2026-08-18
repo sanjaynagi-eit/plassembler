@@ -6,6 +6,8 @@
 * Fixes the 75bp head and tail cropping of long reads, which had been silently ignored since `chopper` v0.11.0. From v0.11.0, `chopper` only applies `--headcrop`/`--tailcrop` when `--trim-approach fixed-crop` is also specified, so `plassembler` now passes this
 * Bumps the minimum `chopper` version to v0.11.0
 * As a result, filtered long reads are 150bp shorter as originally intended, and reads falling below `--min_length` after cropping are now removed. Expect small changes to long read depths and plasmid copy number estimates compared to v1.8.3
+* Makes `chopper` failures fatal. Previously only the last process in the read filtering pipeline was checked, so a `chopper` that exited non-zero (for example, an old `chopper` rejecting `--trim-approach`) left a valid but empty `chopper_long_reads.fastq.gz` and the assembly continued with zero reads. `plassembler` now checks every stage, reports `chopper`'s own error message rather than only the path to the logfile, rejects empty filtered output, and exits
+* `plassembler` now warns if the installed `chopper` is older than v0.11.0, as version pins only bind when an environment is first created
 
 1.8.3 (2026-07-05)
 ------------------

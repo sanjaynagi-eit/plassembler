@@ -1,6 +1,7 @@
 import gzip
 import shutil
 import subprocess as sp
+import sys
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -27,6 +28,60 @@ def gzip_compressor_cmd(threads):
         return ["bgzip", "-@", str(threads), "-c"]
     # bgzip should always be present, but never fail QC over a missing binary
     return ["gzip"]
+
+
+def _chopper_stderr_tail(err_log, max_lines=20):
+    """Last few lines of a chopper logfile, ready to embed in an error message.
+
+    Whatever actually went wrong - an unrecognised flag, a bad value - is written
+    by chopper to its logfile and nowhere else, and users rarely open it. Reading
+    it back puts the real diagnosis where it will be seen.
+
+    :param err_log: path of the chopper .err logfile
+    :param max_lines: how many trailing lines to keep
+    :return: the trailing lines, or "" if the log is missing or empty
+    """
+    try:
+        log_text = Path(err_log).read_text(errors="replace")
+    except OSError:
+        return ""
+    return "\n".join(log_text.strip().splitlines()[-max_lines:])
+
+
+def _fastq_has_reads(filtered_long_reads):
+    """Whether a gzipped fastq actually holds any reads.
+
+    A chopper that dies still leaves a well formed - but empty - gzip member
+    behind, written by the compressor at the end of the chain, so neither the
+    file existing nor it being valid gzip says anything about the run.
+
+    :param filtered_long_reads: path of the gzipped fastq to inspect
+    :return: True if at least one byte of reads can be read back
+    """
+    try:
+        with gzip.open(filtered_long_reads, "rb") as fh:
+            return bool(fh.read(1))
+    except (OSError, EOFError):
+        return False
+
+
+def _fail_chopper(reason, err_log):
+    """Reports a fatal chopper problem and stops the run.
+
+    Everything goes into a single `logger.error`: under the CLI that sink exits
+    the process, so a second call would never be reached.
+
+    :param reason: what went wrong, e.g. "chopper (return code 2)"
+    :param err_log: path of the chopper .err logfile
+    """
+    message = f"Error with chopper: {reason}. Please check {err_log}"
+    stderr_tail = _chopper_stderr_tail(err_log)
+    if stderr_tail:
+        message = f"{message}\nchopper stderr:\n{stderr_tail}"
+    logger.error(message)
+    # the CLI exits inside logger.error above; this covers qc being driven as a
+    # library, where no ERROR sink is installed
+    sys.exit(1)
 
 
 def chopper(
@@ -105,11 +160,9 @@ def chopper(
                 # reap it too, or the error path leaks the zombies the rest of
                 # this function exists to avoid
                 proc.wait()
-            logger.error(f"Error with chopper: {e}")
-            # `logger.error` exits under the CLI's ERROR sink, but not when qc is
-            # used as a library - without this we would fall through and wait on
-            # the processes just killed above, reporting them a second time
-            return
+            # _fail_chopper exits, so the stages killed above are never reached
+            # by the wait loop below and reported a second time
+            _fail_chopper(str(e), f"{logfile_prefix}.err")
 
         # every stage must be waited on. Previously only the last one was, so a
         # failing chopper was silently ignored and left a zombie behind
@@ -119,10 +172,19 @@ def chopper(
                 failures.append(f"{name} (return code {proc.returncode})")
 
     if failures:
-        logger.error(
-            f"Error with chopper: {', '.join(reversed(failures))}. "
-            f"Please check {logfile_prefix}.err"
+        _fail_chopper(", ".join(reversed(failures)), f"{logfile_prefix}.err")
+
+    # a dead stage is not the only way to end up with nothing: whatever the
+    # cause, an empty file here would flow on into Flye/Raven as a zero-read
+    # assembly, so refuse to hand one over
+    if not _fastq_has_reads(filtered_long_reads):
+        _fail_chopper(
+            f"no reads survived filtering. Check that {input_long_reads} holds "
+            f"reads longer than {min_length}bp once 150bp of cropping is applied, "
+            f"with quality above Q{min_quality}",
+            f"{logfile_prefix}.err",
         )
+
     logger.info("Finished running chopper")
 
 
