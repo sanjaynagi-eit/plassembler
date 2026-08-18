@@ -98,7 +98,13 @@ def chopper(
         except OSError as e:
             for _, proc in stages:
                 proc.kill()
+                # reap it too, or the error path leaks the zombies the rest of
+                # this function exists to avoid
+                proc.wait()
             logger.error(f"Error with chopper: {e}")
+            # `logger.error` exits under the CLI's ERROR sink, but not when qc is
+            # used as a library - without this we would fall through and wait on
+            # the processes just killed above, reporting them a second time
             return
 
         # every stage must be waited on. Previously only the last one was, so a
