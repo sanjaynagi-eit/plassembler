@@ -1,5 +1,15 @@
 # History
 
+1.8.4 (2026-08-18)
+------------------
+
+* Fixes the 75bp head and tail cropping of long reads, which had been silently ignored since `chopper` v0.11.0. From v0.11.0, `chopper` only applies `--headcrop`/`--tailcrop` when `--trim-approach fixed-crop` is also specified, so `plassembler` now passes this
+* Bumps the minimum `chopper` version to v0.11.0
+* As a result, filtered long reads are 150bp shorter as originally intended, and reads falling below `--min_length` after cropping are now removed. Expect small changes to long read depths and plasmid copy number estimates compared to v1.8.3
+* Makes `chopper` failures fatal. Previously only the last process in the read filtering pipeline was checked, so a `chopper` that exited non-zero (for example, an old `chopper` rejecting `--trim-approach`) left a valid but empty `chopper_long_reads.fastq.gz` and the assembly continued with zero reads. `plassembler` now checks every stage, reports `chopper`'s own error message rather than only the path to the logfile, rejects empty filtered output, and exits. The per-stage process handling this builds on came from @[sanjaynagi-eit](https://github.com/sanjaynagi-eit) ([#88](https://github.com/gbouras13/plassembler/pull/88)), which also uncovered that `tests/test_data/end_to_end/input_half.fastq.gz` had always ended mid-record, so `chopper` had been failing on it unnoticed
+* `plassembler` now warns if the installed `chopper` is older than v0.11.0, as version pins only bind when an environment is first created
+* Compresses filtered long reads with `bgzip -@` rather than `gzip`, which is roughly 10x faster on a multi-core machine and produces slightly smaller output. BGZF is a valid gzip stream, so nothing downstream changes, and `gzip` is still used where `bgzip` is unavailable. Note that `bgzip` reaches plassembler only via `samtools`' dependency on `htslib`, which does not currently resolve on Apple Silicon - M-series users get the `gzip` fallback and no speedup. Thanks @[sanjaynagi-eit](https://github.com/sanjaynagi-eit) ([#88](https://github.com/gbouras13/plassembler/pull/88))
+
 1.8.3 (2026-07-05)
 ------------------
 

@@ -1,11 +1,87 @@
 import gzip
 import shutil
 import subprocess as sp
+import sys
+from contextlib import ExitStack
 from pathlib import Path
 
 from loguru import logger
 
 from plassembler.utils.external_tools import ExternalTool
+
+
+def gzip_compressor_cmd(threads):
+    """Command that reads plain data on stdin and writes a gzip stream to stdout.
+
+    Prefers bgzip, which ships with htslib/samtools (already a hard plassembler
+    dependency) and compresses in parallel. BGZF is a valid gzip stream, so every
+    downstream reader - flye, minimap2, chopper, gunzip, python's gzip module -
+    handles the result unchanged.
+
+    Serial gzip dominated the chopper stage: on a 300 MB ONT fastq the chain took
+    47.7s, of which only 5.4s was gunzip+chopper and 42s was gzip.
+
+    :param threads: thread count (str or int) to hand to bgzip
+    :return: argv list for the compressor
+    """
+    if shutil.which("bgzip"):
+        return ["bgzip", "-@", str(threads), "-c"]
+    # bgzip should always be present, but never fail QC over a missing binary
+    return ["gzip"]
+
+
+def _chopper_stderr_tail(err_log, max_lines=20):
+    """Last few lines of a chopper logfile, ready to embed in an error message.
+
+    Whatever actually went wrong - an unrecognised flag, a bad value - is written
+    by chopper to its logfile and nowhere else, and users rarely open it. Reading
+    it back puts the real diagnosis where it will be seen.
+
+    :param err_log: path of the chopper .err logfile
+    :param max_lines: how many trailing lines to keep
+    :return: the trailing lines, or "" if the log is missing or empty
+    """
+    try:
+        log_text = Path(err_log).read_text(errors="replace")
+    except OSError:
+        return ""
+    return "\n".join(log_text.strip().splitlines()[-max_lines:])
+
+
+def _fastq_has_reads(filtered_long_reads):
+    """Whether a gzipped fastq actually holds any reads.
+
+    A chopper that dies still leaves a well formed - but empty - gzip member
+    behind, written by the compressor at the end of the chain, so neither the
+    file existing nor it being valid gzip says anything about the run.
+
+    :param filtered_long_reads: path of the gzipped fastq to inspect
+    :return: True if at least one byte of reads can be read back
+    """
+    try:
+        with gzip.open(filtered_long_reads, "rb") as fh:
+            return bool(fh.read(1))
+    except (OSError, EOFError):
+        return False
+
+
+def _fail_chopper(reason, err_log):
+    """Reports a fatal chopper problem and stops the run.
+
+    Everything goes into a single `logger.error`: under the CLI that sink exits
+    the process, so a second call would never be reached.
+
+    :param reason: what went wrong, e.g. "chopper (return code 2)"
+    :param err_log: path of the chopper .err logfile
+    """
+    message = f"Error with chopper: {reason}. Please check {err_log}"
+    stderr_tail = _chopper_stderr_tail(err_log)
+    if stderr_tail:
+        message = f"{message}\nchopper stderr:\n{stderr_tail}"
+    logger.error(message)
+    # the CLI exits inside logger.error above; this covers qc being driven as a
+    # library, where no ERROR sink is installed
+    sys.exit(1)
 
 
 def chopper(
@@ -34,34 +110,81 @@ def chopper(
         threads,
         "-l",
         min_length,
+        # chopper >=0.11.0 only applies --headcrop/--tailcrop under this approach;
+        # without it they are silently ignored
+        "--trim-approach",
+        "fixed-crop",
         "--headcrop",
         "75",
         "--tailcrop",
         "75",
     ]
-    # `with` guarantees the log and output handles are closed even on error;
-    # locals are named *_proc to avoid shadowing the `gzip` module / `chopper`
-    # function name
-    with open(f"{logfile_prefix}.err", "w") as err_log, open(
-        filtered_long_reads, "wb"
-    ) as f:
+    compressor_cmd = gzip_compressor_cmd(threads)
+
+    # ExitStack guarantees the log, output and pipe handles are closed even if a
+    # Popen raises partway through building the chain
+    with ExitStack() as stack:
+        err_log = stack.enter_context(open(f"{logfile_prefix}.err", "w"))
+        out_fh = stack.enter_context(open(filtered_long_reads, "wb"))
+
+        stages = []
         try:
             if gzip_flag is True:
                 source_proc = sp.Popen(
-                    ["gunzip", "-c", input_long_reads], stdout=sp.PIPE
+                    ["gunzip", "-c", input_long_reads], stdout=sp.PIPE, stderr=err_log
                 )
+                stages.append(("gunzip", source_proc))
+                chopper_stdin = source_proc.stdout
             else:
-                source_proc = sp.Popen(["cat", input_long_reads], stdout=sp.PIPE)
+                # plain fastq needs no decompressor: hand the file straight to
+                # chopper rather than spawning a `cat` to copy it through a pipe
+                chopper_stdin = stack.enter_context(open(input_long_reads, "rb"))
+
             chopper_proc = sp.Popen(
-                chopper_cmd,
-                stdin=source_proc.stdout,
-                stdout=sp.PIPE,
-                stderr=err_log,
+                chopper_cmd, stdin=chopper_stdin, stdout=sp.PIPE, stderr=err_log
             )
-            gzip_proc = sp.Popen(["gzip"], stdin=chopper_proc.stdout, stdout=f)
-            gzip_proc.communicate()
-        except Exception:
-            logger.error("Error with chopper")
+            stages.append(("chopper", chopper_proc))
+            # the parent must drop its copy of each upstream read end, otherwise
+            # the downstream stage never sees EOF
+            if gzip_flag is True:
+                source_proc.stdout.close()
+
+            compress_proc = sp.Popen(
+                compressor_cmd, stdin=chopper_proc.stdout, stdout=out_fh, stderr=err_log
+            )
+            stages.append((compressor_cmd[0], compress_proc))
+            chopper_proc.stdout.close()
+        except OSError as e:
+            for _, proc in stages:
+                proc.kill()
+                # reap it too, or the error path leaks the zombies the rest of
+                # this function exists to avoid
+                proc.wait()
+            # _fail_chopper exits, so the stages killed above are never reached
+            # by the wait loop below and reported a second time
+            _fail_chopper(str(e), f"{logfile_prefix}.err")
+
+        # every stage must be waited on. Previously only the last one was, so a
+        # failing chopper was silently ignored and left a zombie behind
+        failures = []
+        for name, proc in reversed(stages):
+            if proc.wait() != 0:
+                failures.append(f"{name} (return code {proc.returncode})")
+
+    if failures:
+        _fail_chopper(", ".join(reversed(failures)), f"{logfile_prefix}.err")
+
+    # a dead stage is not the only way to end up with nothing: whatever the
+    # cause, an empty file here would flow on into Flye/Raven as a zero-read
+    # assembly, so refuse to hand one over
+    if not _fastq_has_reads(filtered_long_reads):
+        _fail_chopper(
+            f"no reads survived filtering. Check that {input_long_reads} holds "
+            f"reads longer than {min_length}bp once 150bp of cropping is applied, "
+            f"with quality above Q{min_quality}",
+            f"{logfile_prefix}.err",
+        )
+
     logger.info("Finished running chopper")
 
 
@@ -104,9 +227,26 @@ def copy_sr_fastq_file(infile: Path, outfile: Path):
         logger.error("Error with copy_sr_fastq_file")
 
 
-def gzip_file(input_path):
+def gzip_file(input_path, threads=1):
+    """gzips a file, in parallel where bgzip is available
+
+    Used by --skip_qc to compress the copied long reads. python's gzip module is
+    both single threaded and slower than the gzip binary, which is a poor fit for
+    a multi-GB ONT fastq; fall back to it only if spawning the compressor fails.
+
+    :param input_path: file to compress
+    :param threads: threads to give the compressor
+    :return: path of the compressed file
+    """
     input_path = Path(input_path)
     output_path = input_path.with_suffix(input_path.suffix + ".gz")
+
+    try:
+        with open(input_path, "rb") as f_in, open(output_path, "wb") as f_out:
+            sp.run(gzip_compressor_cmd(threads), stdin=f_in, stdout=f_out, check=True)
+        return output_path
+    except (OSError, sp.CalledProcessError) as e:
+        logger.warning(f"Falling back to python gzip for {input_path}: {e}")
 
     with open(input_path, "rb") as f_in:
         with gzip.open(output_path, "wb") as f_out:
