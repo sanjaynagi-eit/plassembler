@@ -491,7 +491,7 @@ def run(
                 longreads,
                 Path(f"{outdir}/chopper_long_reads.fastq"),
             )
-            gzip_file(Path(f"{outdir}/chopper_long_reads.fastq"))
+            gzip_file(Path(f"{outdir}/chopper_long_reads.fastq"), threads)
             remove_file(Path(f"{outdir}/chopper_long_reads.fastq"))
 
     # Raven for long only or '--use_raven'
@@ -1103,7 +1103,7 @@ def assembled(
                         longreads,
                         Path(f"{outdir}/chopper_long_reads.fastq"),
                     )
-                    gzip_file(Path(f"{outdir}/chopper_long_reads.fastq"))
+                    gzip_file(Path(f"{outdir}/chopper_long_reads.fastq"), threads)
                     remove_file(Path(f"{outdir}/chopper_long_reads.fastq"))
 
         if short_flag is True:
@@ -1454,7 +1454,7 @@ def long(
                 longreads,
                 Path(f"{outdir}/chopper_long_reads.fastq"),
             )
-            gzip_file(Path(f"{outdir}/chopper_long_reads.fastq"))
+            gzip_file(Path(f"{outdir}/chopper_long_reads.fastq"), threads)
             remove_file(Path(f"{outdir}/chopper_long_reads.fastq"))
 
     # flye - skip directory an option here

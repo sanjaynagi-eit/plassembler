@@ -1,5 +1,23 @@
 # History
 
+1.8.5 (2026-09-07)
+------------------
+
+* Concatenates reads and contigs by block copy rather than round-tripping every record through BioPython. `concatenate_single_fastq` parsed both inputs into a list of `SeqRecord`s and wrote them out again, which costs roughly 5-10x the file size in RAM; on 250 MiB of short reads that was 27s and 1.8 GB of peak RSS, and is now 0.7s and 46 MB. Only the non-chromosomal short reads pass through here, so the saving is a transient GB or two rather than the whole run - but it landed immediately before Unicycler, which needs the memory itself. `Plass.get_depth_long` no longer builds its own list of records either. Thanks @[sanjaynagi-eit](https://github.com/sanjaynagi-eit) ([#90](https://github.com/gbouras13/plassembler/pull/90))
+* A wrong-format input is now caught by checking the first byte against the format's record marker (`@` or `>`) instead of by parsing every record, keeping that check at O(1) instead of O(file). One consequence: a truncated *uncompressed* FASTQ is no longer rejected, where full parsing used to raise. Truncated `.gz` input still fails, because the decompressor raises before the copy finishes
+* Concatenation now writes to a `.tmp` sibling and renames it into place. A wrong-format second input, a truncated gzip or a full disk can no longer leave a half-written FASTQ where the run expects a complete one, and a failed re-run leaves any previous output intact
+* An empty `chromosome.fasta` reaching `Assembly.combine_input_fastas` is now a fatal error with a message explaining it. `list(SeqIO.parse(...))[0]` used to raise `IndexError` there; streaming the records has no equivalent, and without an explicit check every depth and copy number would have been computed against a `combined.fasta` containing no chromosome
+
+1.8.4 (2026-08-18)
+------------------
+
+* Fixes the 75bp head and tail cropping of long reads, which had been silently ignored since `chopper` v0.11.0. From v0.11.0, `chopper` only applies `--headcrop`/`--tailcrop` when `--trim-approach fixed-crop` is also specified, so `plassembler` now passes this
+* Bumps the minimum `chopper` version to v0.11.0
+* As a result, filtered long reads are 150bp shorter as originally intended, and reads falling below `--min_length` after cropping are now removed. Expect small changes to long read depths and plasmid copy number estimates compared to v1.8.3
+* Makes `chopper` failures fatal. Previously only the last process in the read filtering pipeline was checked, so a `chopper` that exited non-zero (for example, an old `chopper` rejecting `--trim-approach`) left a valid but empty `chopper_long_reads.fastq.gz` and the assembly continued with zero reads. `plassembler` now checks every stage, reports `chopper`'s own error message rather than only the path to the logfile, rejects empty filtered output, and exits. The per-stage process handling this builds on came from @[sanjaynagi-eit](https://github.com/sanjaynagi-eit) ([#88](https://github.com/gbouras13/plassembler/pull/88)), which also uncovered that `tests/test_data/end_to_end/input_half.fastq.gz` had always ended mid-record, so `chopper` had been failing on it unnoticed
+* `plassembler` now warns if the installed `chopper` is older than v0.11.0, as version pins only bind when an environment is first created
+* Compresses filtered long reads with `bgzip -@` rather than `gzip`, which is roughly 10x faster on a multi-core machine and produces slightly smaller output. BGZF is a valid gzip stream, so nothing downstream changes, and `gzip` is still used where `bgzip` is unavailable. Note that `bgzip` reaches plassembler only via `samtools`' dependency on `htslib`, which does not currently resolve on Apple Silicon - M-series users get the `gzip` fallback and no speedup. Thanks @[sanjaynagi-eit](https://github.com/sanjaynagi-eit) ([#88](https://github.com/gbouras13/plassembler/pull/88))
+
 1.8.3 (2026-07-05)
 ------------------
 
