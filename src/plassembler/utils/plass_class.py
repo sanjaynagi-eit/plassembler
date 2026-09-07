@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -918,7 +919,8 @@ class Assembly:
         """
         # combined input fasta
         combined_fasta = Path(self.outdir) / "combined.fasta"
-        chromosome_name = ""
+        # None, not "", so that a record with an empty header still counts as found
+        chromosome_name = None
 
         # rename the first contig as chromosome. Records are streamed rather than
         # collected into a list first, so an assembly is never held whole in RAM
@@ -930,6 +932,19 @@ class Assembly:
                     record.id = "chromosome"
                     record.description = ""
                 SeqIO.write(record, f_out, "fasta")
+
+        if chromosome_name is None:
+            # streaming has no equivalent of list(SeqIO.parse(...))[0] raising
+            # IndexError, so an empty or non-FASTA chromosome would otherwise
+            # sail through and leave every depth and copy number computed
+            # against a combined.fasta with no chromosome in it
+            logger.error(
+                f"No contigs were found in {chromosome_fasta}. "
+                "Please check the chromosome assembly."
+            )
+            # logger.error exits under the CLI's ERROR sink, but not when
+            # plass_class is driven as a library
+            sys.exit(1)
 
         plasmid_names = []
 
