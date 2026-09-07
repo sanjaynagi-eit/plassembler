@@ -1,4 +1,5 @@
 import gzip
+import os
 from pathlib import Path
 
 from loguru import logger
@@ -73,22 +74,48 @@ def _append_file(source: Path, out_handle, record_marker: bytes):
         out_handle.write(b"\n")
 
 
+def _concatenate(sources, out_path, record_marker: bytes):
+    """Block-copy sources into out_path, leaving no output behind on failure.
+
+    The copy goes to a sibling .tmp and is renamed into place only once every
+    source has been read, so a wrong-format second input, a truncated gzip or a
+    full disk cannot leave a half-written FASTQ/FASTA where the run expects a
+    complete one. The SeqIO version got this for free by parsing everything
+    before it opened the output.
+
+    :param sources: files to copy, in order
+    :param out_path: destination path
+    :param record_marker: first byte every record of this format starts with
+    """
+    out_path = Path(out_path)
+    tmp_path = out_path.with_name(f"{out_path.name}.tmp")
+    try:
+        with open(tmp_path, "wb") as out_handle:
+            for source in sources:
+                _append_file(source, out_handle, record_marker)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    # same directory, so this is an atomic replace rather than a copy
+    os.replace(tmp_path, out_path)
+
+
 def concatenate_single_fastq(fastq_in1: Path, fastq_in2: Path, fastq_out: Path):
     """concatenates 2 fastq files
 
     Concatenating reads needs no parsing. Round-tripping them through
     SeqIO.parse into a list of SeqRecords cost roughly 5-10x the file size in
-    RAM, which for the short-read files of a hybrid run is tens of GB; a block
-    copy is constant-memory and far faster.
+    RAM. Only the non-chromosomal short reads pass through here, so that is a
+    transient spike of a GB or two on a typical isolate rather than the whole
+    run - but it landed immediately before Unicycler, which needs the memory
+    itself. A block copy is constant-memory and far faster.
 
     :param fastq_in1:  fastq_in1 input fastq 1
     :param fastq_in2: fastq_in1 input fastq 2
     :param fastq_out: fastq_out output fastq 2
     :return:
     """
-    with open(fastq_out, "wb") as out_handle:
-        _append_file(fastq_in1, out_handle, b"@")
-        _append_file(fastq_in2, out_handle, b"@")
+    _concatenate([fastq_in1, fastq_in2], fastq_out, b"@")
 
 
 def concatenate_single_fasta(file1: Path, file2: Path, output_file: Path):
@@ -98,6 +125,4 @@ def concatenate_single_fasta(file1: Path, file2: Path, output_file: Path):
     :param output_file: output fasta
     :return:
     """
-    with open(output_file, "wb") as out_handle:
-        _append_file(file1, out_handle, b">")
-        _append_file(file2, out_handle, b">")
+    _concatenate([file1, file2], output_file, b">")

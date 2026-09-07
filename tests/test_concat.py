@@ -89,3 +89,56 @@ def test_concatenate_fasta_rejects_a_fastq(tmp_path):
     b.write_text(">1\nACGT\n")
     with pytest.raises(ValueError):
         concatenate_single_fasta(a, b, tmp_path / "out.fasta")
+
+
+def test_concatenate_leaves_no_output_when_second_file_is_wrong_format(tmp_path):
+    """A failure must not leave a half-written file where the run expects a whole one.
+
+    The block copy opens the output before it has seen the second input, so
+    without the .tmp-and-rename the first file's reads would be left behind as a
+    complete-looking FASTQ.
+    """
+    a, b = tmp_path / "a.fastq", tmp_path / "b.fasta"
+    a.write_text(READS_A)
+    b.write_text(">contig1\nACGT\n")
+    out = tmp_path / "out.fastq"
+    with pytest.raises(ValueError):
+        concatenate_single_fastq(a, b, out)
+    assert not out.exists()
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_concatenate_leaves_an_existing_output_untouched_on_failure(tmp_path):
+    """The previous output survives a failed re-run rather than being truncated."""
+    a, b = tmp_path / "a.fastq", tmp_path / "b.fasta"
+    a.write_text(READS_A)
+    b.write_text(">contig1\nACGT\n")
+    out = tmp_path / "out.fastq"
+    out.write_text(READS_B)
+    with pytest.raises(ValueError):
+        concatenate_single_fastq(a, b, out)
+    assert out.read_text() == READS_B
+
+
+def test_concatenate_leaves_no_output_when_gzip_is_truncated(tmp_path):
+    """A truncated .gz raises from the decompressor mid-copy, so nothing is kept."""
+    a, b = tmp_path / "a.fastq.gz", tmp_path / "b.fastq"
+    with gzip.open(a, "wb") as fh:
+        fh.write((READS_A * 5000).encode())
+    raw = a.read_bytes()
+    a.write_bytes(raw[: len(raw) // 2])
+    b.write_text(READS_B)
+    out = tmp_path / "out.fastq"
+    with pytest.raises(EOFError):
+        concatenate_single_fastq(a, b, out)
+    assert not out.exists()
+
+
+def test_concatenate_accepts_a_string_output_path(tmp_path):
+    """tests/test_plassembler.py passes os.path.join(...) rather than a Path."""
+    a, b = tmp_path / "a.fastq", tmp_path / "b.fastq"
+    a.write_text(READS_A)
+    b.write_text(READS_B)
+    out = str(tmp_path / "out.fastq")
+    concatenate_single_fastq(a, b, out)
+    assert [r[0] for r in records(out)] == ["r1", "r2", "r3"]
