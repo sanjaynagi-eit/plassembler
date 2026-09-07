@@ -188,6 +188,23 @@ def validate_flye_assembly_info(flye_assembly, flye_info):
     return skip_assembly
 
 
+# plassembler passes `--trim-approach fixed-crop`, which chopper only gained in
+# v0.11.0; older versions reject the flag outright
+MIN_CHOPPER_VERSION = (0, 11, 0)
+
+
+def parse_chopper_version(version_output: str):
+    """Extract (major, minor, patch) from `chopper --version` output.
+
+    :param version_output: stdout of ``chopper --version``, e.g. "chopper 0.11.0".
+    :return: the version as a tuple of ints, or None if it cannot be parsed.
+    """
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_output)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
 def parse_unicycler_version(version_output: str):
     """Extract (major, minor, patch) from `unicycler --version` output.
 
@@ -330,6 +347,8 @@ def check_dependencies():
         logger.error("fastp not found.")
 
     # chopper
+    # bound up front: the gate below still runs if the version could not be read
+    chopper_version = ""
     try:
         process = sp.Popen(["chopper", "--version"], stdout=sp.PIPE, stderr=sp.PIPE)
         chopper_out, _ = process.communicate()
@@ -339,6 +358,21 @@ def check_dependencies():
         logger.info(message)
     except Exception:
         logger.error("chopper not found.")
+
+    # a version pin only binds at install time, so an environment built before the
+    # bump can still hold a chopper that rejects --trim-approach. Warn rather than
+    # exit, so anyone deliberately on an older chopper can still run
+    parsed_chopper_version = parse_chopper_version(chopper_version)
+    min_chopper_version = ".".join(str(part) for part in MIN_CHOPPER_VERSION)
+    if parsed_chopper_version is None:
+        message = f"Could not determine the chopper version from '{chopper_version}'. Plassembler needs chopper >=v{min_chopper_version}."
+        logger.warning(message)
+    elif parsed_chopper_version < MIN_CHOPPER_VERSION:
+        message = f"chopper v{chopper_version} is older than v{min_chopper_version} and will reject the --trim-approach flag Plassembler passes, so long read filtering will fail. Please update chopper, see instructions at https://github.com/gbouras13/plassembler."
+        logger.warning(message)
+    else:
+        message = "chopper version is ok."
+        logger.info(message)
 
     # mash
     try:
